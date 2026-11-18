@@ -1,0 +1,96 @@
+{
+  "id": "lendloopErrors01",
+  "name": "LendLoop – Error handler",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "nodes": [
+    {
+      "id": "c1",
+      "name": "On workflow error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "c2",
+      "name": "Build report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst secret = $env.LENDLOOP_SHARED_SECRET;\nif (!secret) throw new Error('LENDLOOP_SHARED_SECRET is not set');\nconst sign = (ts, body) => crypto.createHmac('sha256', secret).update(`${ts}.${body}`).digest('hex');\n\n// Report the failed execution to Convex so it shows up in the admin view.\nconst e = $input.first().json;\nconst body = JSON.stringify({\n  executionId: e.execution?.id ?? `trigger-${Date.now()}`,\n  workflow: e.workflow?.name ?? 'unknown',\n  node: e.execution?.lastNodeExecuted ?? e.trigger?.node?.name ?? 'unknown',\n  message: String(e.execution?.error?.message ?? e.trigger?.error?.message ?? 'unknown error').slice(0, 200),\n});\nconsole.error('[LendLoop automation error]', body);\nconst ts = String(Date.now());\nreturn [{ json: { body, ts, sig: sign(ts, body) } }];\n"
+      }
+    },
+    {
+      "id": "c3",
+      "name": "Report to Convex",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CONVEX_SITE_URL }}/n8n/workflow-error",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-lendloop-timestamp",
+              "value": "={{ $json.ts }}"
+            },
+            {
+              "name": "x-lendloop-signature",
+              "value": "={{ $json.sig }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.body }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    }
+  ],
+  "connections": {
+    "On workflow error": {
+      "main": [
+        [
+          {
+            "node": "Build report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build report": {
+      "main": [
+        [
+          {
+            "node": "Report to Convex",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {}
+}

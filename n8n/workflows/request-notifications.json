@@ -1,0 +1,232 @@
+{
+  "id": "lendloopRequest1",
+  "name": "LendLoop – Request notifications",
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "lendloopErrors01",
+    "saveManualExecutions": true
+  },
+  "nodes": [
+    {
+      "id": "a1",
+      "name": "Convex webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lendloop-request",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "webhookId": "5a0c7f2e-6b1d-4a8e-9a43-1d2f3b4c5d61"
+    },
+    {
+      "id": "a2",
+      "name": "Verify signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst secret = $env.LENDLOOP_SHARED_SECRET;\nif (!secret) throw new Error('LENDLOOP_SHARED_SECRET is not set');\nconst sign = (ts, body) => crypto.createHmac('sha256', secret).update(`${ts}.${body}`).digest('hex');\n\n// Verify the HMAC signature from Convex before trusting anything in the payload.\nconst item = $input.first();\nconst headers = item.json.headers ?? {};\nconst ts = headers['x-lendloop-timestamp'];\nconst sig = headers['x-lendloop-signature'];\nlet raw;\nif (item.binary?.data) {\n  raw = (await this.helpers.getBinaryDataBuffer(0, 'data')).toString('utf8');\n} else {\n  raw = JSON.stringify(item.json.body);\n}\nconst fresh = ts && Math.abs(Date.now() - Number(ts)) < 5 * 60 * 1000;\nconst expected = ts ? sign(ts, raw) : '';\nconst valid = Boolean(\n  fresh && sig && sig.length === expected.length &&\n  crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))\n);\nif (!valid) return [{ json: { valid: false } }];\n\nconst body = JSON.parse(raw);\n// Drop duplicates: Convex retries with the same eventKey.\nconst store = $getWorkflowStaticData('global');\nstore.seen = store.seen ?? [];\nconst duplicate = store.seen.includes(body.eventKey);\nif (!duplicate) {\n  store.seen.push(body.eventKey);\n  store.seen = store.seen.slice(-500);\n}\n// Keep only the fields the notification needs.\nreturn [{ json: {\n  valid: true,\n  duplicate,\n  eventKey: body.eventKey,\n  event: body.event,\n  to: body.recipient,\n  toolName: body.toolName,\n  otherPartyName: body.otherPartyName,\n  startDate: body.startDate,\n  endDate: body.endDate,\n} }];\n"
+      }
+    },
+    {
+      "id": "a3",
+      "name": "Signature valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        480,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "a4",
+      "name": "Already handled?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        720,
+        200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "c2",
+              "leftValue": "={{ $json.duplicate }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "a5",
+      "name": "Notify user (mock)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        280
+      ],
+      "parameters": {
+        "jsCode": "// Mock notification: logs what would be emailed. Swap for an Email/Slack node in production.\nconst j = $input.first().json;\nconst lines = {\n  'loan.pending': `${j.otherPartyName} wants to borrow your ${j.toolName} (${j.startDate} → ${j.endDate}).`,\n  'loan.approved': `${j.otherPartyName} approved your request for the ${j.toolName} (${j.startDate} → ${j.endDate}).`,\n  'loan.declined': `${j.otherPartyName} declined your request for the ${j.toolName}.`,\n  'loan.cancelled': `${j.otherPartyName} cancelled the request for your ${j.toolName}.`,\n  'loan.returned': `${j.otherPartyName} marked the ${j.toolName} as returned. Thanks for borrowing!`,\n};\nconst text = lines[j.event];\nif (!text) throw new Error(`Unknown event ${j.event}`);\nconst message = { to: j.to.email, name: j.to.name, subject: 'LendLoop update', text };\nconsole.log('[LendLoop notification]', JSON.stringify(message));\nreturn [{ json: { ok: true, eventKey: j.eventKey, channel: 'mock-log', message } }];\n"
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "id": "a6",
+      "name": "Respond 200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1200,
+        200
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, eventKey: $json.eventKey } }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "a7",
+      "name": "Respond 401",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        720,
+        420
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { error: 'invalid signature' } }}",
+        "options": {
+          "responseCode": 401
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Convex webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify signature": {
+      "main": [
+        [
+          {
+            "node": "Signature valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Signature valid?": {
+      "main": [
+        [
+          {
+            "node": "Already handled?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 401",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Already handled?": {
+      "main": [
+        [
+          {
+            "node": "Respond 200",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Notify user (mock)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify user (mock)": {
+      "main": [
+        [
+          {
+            "node": "Respond 200",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {}
+}
